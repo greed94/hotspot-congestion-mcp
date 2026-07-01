@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+서울시 주요 121장소 영역/
+*.xlsx
+*.pdf

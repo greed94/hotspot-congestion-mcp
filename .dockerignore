@@ -1,0 +1,15 @@
+.env
+.venv
+venv
+__pycache__
+*.pyc
+.git
+.gitignore
+서울시 주요 121장소 영역
+*.xlsx
+*.pdf
+smoke_test.py
+test_hotspot.py
+build_area_list.py
+MVP_핫플혼잡도.md
+DEPLOY_CHECKLIST.md
