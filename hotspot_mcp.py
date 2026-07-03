@@ -10,6 +10,7 @@ import os
 import re
 import json
 import time
+import asyncio
 import difflib
 import urllib.parse
 from typing import Any
@@ -79,11 +80,21 @@ ALIASES = {
     "강남": "강남역", "코엑스": "강남 MICE 관광특구", "삼성역": "강남 MICE 관광특구",
     "성수": "성수카페거리", "성수동": "성수카페거리", "압구정": "압구정로데오거리",
     "청담": "청담동 명품거리", "광화문": "광화문·덕수궁",
+    "홍대입구": "홍대입구역(2호선)", "홍대입구역": "홍대입구역(2호선)",
+    "연남": "연남동", "연트럴파크": "연남동",
     "롯데타워": "잠실롯데타워·석촌호수", "석촌호수": "잠실롯데타워·석촌호수",
+    "롯데월드": "잠실롯데타워·석촌호수", "롯데월드타워": "잠실롯데타워·석촌호수",
     "ddp": "DDP(동대문디자인플라자)", "동대문디자인플라자": "DDP(동대문디자인플라자)",
     "dmc": "DMC(디지털미디어시티)", "남산": "남산공원", "서울숲": "서울숲공원",
+    "남산타워": "남산공원", "n서울타워": "남산공원", "서울타워": "남산공원",
     "신촌": "신촌·이대역", "건대": "건대입구역", "서울대": "서울대입구역",
-    "여의도한강": "여의도한강공원",
+    "여의도한강": "여의도한강공원", "더현대": "여의도", "더현대서울": "여의도",
+    "뚝섬유원지": "뚝섬한강공원", "뚝섬한강": "뚝섬한강공원",
+    "망원한강": "망원한강공원", "반포한강": "반포한강공원", "난지한강": "난지한강공원",
+    "광나루한강": "광나루한강공원", "양화한강": "양화한강공원", "이촌한강": "이촌한강공원",
+    "잠실한강": "잠실한강공원", "잠원한강": "잠원한강공원",
+    "광장시장": "광장(전통)시장", "남대문": "남대문시장", "타임스퀘어": "영등포 타임스퀘어",
+    "고터": "고속터미널역", "강남고터": "고속터미널역", "이수역": "총신대입구(이수)역",
 }
 
 
@@ -101,6 +112,57 @@ def _load_areas() -> list[str]:
 
 AREAS = _load_areas()
 
+
+def _has_any(name: str, keywords: tuple[str, ...]) -> bool:
+    return any(k in name for k in keywords)
+
+
+def _area_categories() -> dict[str, list[str]]:
+    categories = {
+        "관광특구": [],
+        "한강공원": [],
+        "공원·산책": [],
+        "역세권": [],
+        "상권·거리·시장": [],
+        "고궁·문화·명소": [],
+        "기타": [],
+    }
+    for name in AREAS:
+        if name.endswith("관광특구"):
+            categories["관광특구"].append(name)
+        elif "한강공원" in name:
+            categories["한강공원"].append(name)
+        elif "공원" in name or "숲" in name or name in ("아차산", "응봉산", "청계산", "노들섬", "안양천", "홍제폭포", "송현녹지광장"):
+            categories["공원·산책"].append(name)
+        elif name.endswith("역") or "역(" in name or "역·" in name or "·" in name and "역" in name:
+            categories["역세권"].append(name)
+        elif _has_any(name, ("거리", "길", "시장", "타임스퀘어", "카페", "로데오", "먹자", "서촌", "익선동", "인사동", "여의도", "노량진", "해방촌")):
+            categories["상권·거리·시장"].append(name)
+        elif _has_any(name, ("궁", "종묘", "박물관", "DDP", "돔", "운동장", "광장", "보신각", "숭례문", "유적", "공항")):
+            categories["고궁·문화·명소"].append(name)
+        else:
+            categories["기타"].append(name)
+    return {k: v for k, v in categories.items() if v}
+
+
+AREA_CATEGORIES = _area_categories()
+
+DEFAULT_RECOMMEND_AREAS = [
+    "홍대 관광특구", "홍대입구역(2호선)", "연남동", "성수카페거리", "강남역",
+    "잠실롯데타워·석촌호수", "명동 관광특구", "광화문·덕수궁", "이태원 관광특구",
+    "여의도", "여의도한강공원", "반포한강공원", "뚝섬한강공원", "서울숲공원",
+]
+
+CATEGORY_ALIASES = {
+    "전체": "전체", "핫플": "전체", "어디": "전체", "근처": "전체",
+    "한강": "한강공원", "한강공원": "한강공원",
+    "공원": "공원·산책", "산책": "공원·산책", "숲": "공원·산책", "산": "공원·산책",
+    "역": "역세권", "역세권": "역세권", "지하철": "역세권",
+    "상권": "상권·거리·시장", "거리": "상권·거리·시장", "시장": "상권·거리·시장", "카페": "상권·거리·시장",
+    "관광": "관광특구", "관광특구": "관광특구",
+    "문화": "고궁·문화·명소", "고궁": "고궁·문화·명소", "명소": "고궁·문화·명소",
+}
+
 _NORM_RE = re.compile(r"[\s·・•()\[\]\-_.,~’'\"]+")
 
 
@@ -111,6 +173,25 @@ def _norm(s: str) -> str:
 
 _NORM_TO_NAME = {_norm(n): n for n in AREAS}
 _NORM_ALIASES = {_norm(k): v for k, v in ALIASES.items()}
+
+
+def _embedded_place_matches(q: str) -> list[str]:
+    """'홍대입구역 롯데리아'처럼 지원 장소명 뒤에 부가어가 붙은 입력을 복구한다."""
+    hits: list[tuple[int, str]] = []
+    for norm, name in _NORM_TO_NAME.items():
+        if len(norm) >= 3 and norm in q:
+            hits.append((len(norm), name))
+    for norm, name in _NORM_ALIASES.items():
+        if len(norm) >= 2 and norm in q:
+            hits.append((len(norm), name))
+    if not hits:
+        return []
+    max_len = max(length for length, _ in hits)
+    names = []
+    for _, name in sorted((h for h in hits if h[0] == max_len), reverse=True):
+        if name not in names:
+            names.append(name)
+    return names
 
 
 def resolve_place(query: str):
@@ -127,7 +208,12 @@ def resolve_place(query: str):
         return ("ok", contains[0])
     if len(contains) > 1:
         return ("ambiguous", contains[:6])
-    close = difflib.get_close_matches(q, list(_NORM_TO_NAME), n=3, cutoff=0.6)  # 4. 오타 보정
+    embedded = _embedded_place_matches(q)          # 4. 지원 장소명 + 가게명/부가어 복구
+    if len(embedded) == 1:
+        return ("ok", embedded[0])
+    if len(embedded) > 1:
+        return ("ambiguous", embedded[:6])
+    close = difflib.get_close_matches(q, list(_NORM_TO_NAME), n=3, cutoff=0.6)  # 5. 오타 보정
     if len(close) == 1:
         return ("ok", _NORM_TO_NAME[close[0]])
     if close:
@@ -163,7 +249,11 @@ async def fetch_citydata(place_name: str) -> dict[str, Any]:
     code = result.get("RESULT.CODE")
     if code and code != "INFO-000":
         raise CityDataError(code, result.get("RESULT.MESSAGE", ""))
-    city = data.get("CITYDATA", data)
+    city = data.get("CITYDATA")
+    if city is None and any(k in data for k in ("AREA_NM", "LIVE_PPLTN_STTS", "WEATHER_STTS")):
+        city = data
+    if not isinstance(city, dict) or not city.get("AREA_NM"):
+        raise CityDataError("NO_DATA", "CITYDATA 없음")
     _cache[place_name] = (now, city)
     return city
 
@@ -202,6 +292,75 @@ def parse_forecast(citydata: dict) -> list[dict]:
     } for f in fcst]
 
 
+def _to_int(value: Any, default: int = 999999999) -> int:
+    digits = re.sub(r"\D+", "", str(value or ""))
+    return int(digits) if digits else default
+
+
+def _population_text(c: dict) -> str:
+    mn, mx = c.get("ppltn_min"), c.get("ppltn_max")
+    if mn and mx:
+        return f"실시간 인구 {mn}~{mx}명"
+    return "실시간 인구 정보없음"
+
+
+def _weather_by_hour(citydata: dict) -> dict[str, dict]:
+    weather = _first(citydata.get("WEATHER_STTS"))
+    fcst = weather.get("FCST24HOURS") or []
+    if isinstance(fcst, dict):
+        fcst = [fcst]
+    out = {}
+    for item in fcst:
+        dt = str(item.get("FCST_DT", ""))
+        if len(dt) >= 10:
+            out[f"{dt[:4]}-{dt[4:6]}-{dt[6:8]} {dt[8:10]}:00"] = item
+    return out
+
+
+def _weather_suffix(time_text: str, weather_map: dict[str, dict]) -> str:
+    item = weather_map.get(time_text)
+    if not item:
+        return ""
+    parts = []
+    if item.get("TEMP"):
+        parts.append(f"{item['TEMP']}°C")
+    if item.get("SKY_STTS"):
+        parts.append(item["SKY_STTS"])
+    if item.get("RAIN_CHANCE"):
+        parts.append(f"강수확률 {item['RAIN_CHANCE']}%")
+    ptype = item.get("PRECPT_TYPE")
+    if ptype and ptype != "없음":
+        parts.append(ptype)
+    return f" ({', '.join(parts)})" if parts else ""
+
+
+def _visit_advisories(citydata: dict) -> list[str]:
+    notes = []
+    weather = _first(citydata.get("WEATHER_STTS"))
+    if weather:
+        ptype = weather.get("PRECPT_TYPE")
+        if ptype and ptype != "없음":
+            notes.append(f"현재 {ptype} 소식이 있어요")
+        elif weather.get("PCP_MSG") and "없" not in weather["PCP_MSG"]:
+            notes.append(weather["PCP_MSG"])
+        if weather.get("PM10_INDEX") in ("나쁨", "매우나쁨") or weather.get("PM25_INDEX") in ("나쁨", "매우나쁨"):
+            notes.append("미세먼지 상태를 확인하고 이동하세요")
+
+    road_root = citydata.get("ROAD_TRAFFIC_STTS") or {}
+    road = _first(road_root.get("AVG_ROAD_DATA") if isinstance(road_root, dict) else {})
+    if road.get("ROAD_TRAFFIC_IDX") in ("정체", "서행"):
+        notes.append(f"주변 도로 {road['ROAD_TRAFFIC_IDX']}")
+
+    for section in ("LIVE_DST_MESSAGE", "ACDNT_CNTRL_STTS"):
+        items = citydata.get(section) or []
+        if isinstance(items, dict):
+            items = [items]
+        if items:
+            notes.append("재난·통제 정보가 있어요")
+            break
+    return notes[:2]
+
+
 def pick_best_times(forecast: list[dict], top_n: int = 3) -> list[dict]:
     ranked = sorted(
         [f for f in forecast if f.get("level") in CONGEST_ORDER],
@@ -211,6 +370,50 @@ def pick_best_times(forecast: list[dict], top_n: int = 3) -> list[dict]:
 
 
 NOTE = "※ 통신사 기지국 기반 추정치라 실제와 차이가 있을 수 있어요."
+
+
+def _category_key(category: str) -> str:
+    q = _norm(category or "전체")
+    if not q:
+        return "전체"
+    for alias, key in CATEGORY_ALIASES.items():
+        if _norm(alias) in q:
+            return key
+    return "전체"
+
+
+def _candidate_places(category: str, max_candidates: int = 16) -> tuple[str, list[str], bool]:
+    key = _category_key(category)
+    if key == "전체":
+        return key, [p for p in DEFAULT_RECOMMEND_AREAS if p in AREAS], False
+    places = AREA_CATEGORIES.get(key, [])
+    return key, places[:max_candidates], len(places) > max_candidates
+
+
+async def _fetch_summary(place: str) -> dict:
+    data = await fetch_citydata(place)
+    c = parse_congestion(data)
+    return {
+        "place": c["area"] or place,
+        "level": c["congest_level"],
+        "score": CONGEST_ORDER.get(c["congest_level"], 99),
+        "population_score": (_to_int(c.get("ppltn_min")) + _to_int(c.get("ppltn_max"))) / 2,
+        "population": _population_text(c),
+        "commercial": c["commercial_level"],
+        "advisories": _visit_advisories(data),
+    }
+
+
+async def _fetch_many_summaries(places: list[str]) -> tuple[list[dict], list[tuple[str, Exception]]]:
+    results = await asyncio.gather(*(_fetch_summary(p) for p in places), return_exceptions=True)
+    ok, errors = [], []
+    for place, result in zip(places, results):
+        if isinstance(result, Exception):
+            errors.append((place, result))
+        else:
+            ok.append(result)
+    ok.sort(key=lambda x: (x["score"], x["population_score"], x["place"]))
+    return ok, errors
 
 
 def _unresolved_msg(query: str, kind: str, candidates: list[str]) -> str:
@@ -234,7 +437,7 @@ def _friendly_error(e: Exception, place: str) -> str:
 # ---------- MCP 도구 ----------
 @mcp.tool()
 async def get_hotspot_congestion(place_name: str) -> str:
-    """지정한 서울 핫플의 지금 혼잡도와 상권 활기를 알려줍니다."""
+    """서울 주요 장소의 지금 혼잡도와 상권 활기를 알려줍니다. 가게명보다 '홍대입구역', '성수', '더현대'처럼 장소/권역명을 넣으세요."""
     kind, val = resolve_place(place_name)
     if kind != "ok":
         return _unresolved_msg(place_name, kind, val)
@@ -244,49 +447,54 @@ async def get_hotspot_congestion(place_name: str) -> str:
     except Exception as e:
         return _friendly_error(e, place)
     c = parse_congestion(data)
+    advisories = _visit_advisories(data)
+    advisory_line = f"방문 참고: {' / '.join(advisories)}\n" if advisories else ""
     return (
         f"📍 {c['area'] or place} 지금\n"
-        f"혼잡도: {c['congest_level']} (실시간 인구 {c['ppltn_min']}~{c['ppltn_max']}명)\n"
+        f"혼잡도: {c['congest_level']} ({_population_text(c)})\n"
         f"상권 활기: {c['commercial_level']}\n"
         f"한줄: {c['congest_msg']}\n"
+        f"{advisory_line}"
         f"{NOTE}"
     )
 
 
 @mcp.tool()
-async def compare_hotspots(place_a: str, place_b: str) -> str:
-    """두 핫플의 현재 혼잡도를 비교해 어디가 더 한산한지 알려줍니다."""
-    ka, va = resolve_place(place_a)
-    if ka != "ok":
-        return _unresolved_msg(place_a, ka, va)
-    kb, vb = resolve_place(place_b)
-    if kb != "ok":
-        return _unresolved_msg(place_b, kb, vb)
-    a, b = va, vb
-    try:
-        da = await fetch_citydata(a)
-    except Exception as e:
-        return _friendly_error(e, a)
-    try:
-        db = await fetch_citydata(b)
-    except Exception as e:
-        return _friendly_error(e, b)
-    ca, cb = parse_congestion(da), parse_congestion(db)
-    la = CONGEST_ORDER.get(ca["congest_level"], 99)
-    lb = CONGEST_ORDER.get(cb["congest_level"], 99)
-    if la == lb:
-        verdict = "둘 다 비슷해요."
+async def compare_hotspots(place_a: str, place_b: str, place_c: str = "", place_d: str = "") -> str:
+    """서울 핫플 2~4곳의 현재 혼잡도를 비교합니다. '성수 vs 홍대 vs 강남역'처럼 여러 후보 중 더 한산한 곳을 고를 때 쓰세요."""
+    queries = [q.strip() for q in (place_a, place_b, place_c, place_d) if q and q.strip()]
+    if len(queries) < 2:
+        return "비교하려면 장소를 최소 2곳 알려주세요. 예: 성수와 홍대 비교"
+
+    places = []
+    for query in queries:
+        kind, val = resolve_place(query)
+        if kind != "ok":
+            return _unresolved_msg(query, kind, val)
+        if val not in places:
+            places.append(val)
+
+    summaries, errors = await _fetch_many_summaries(places)
+    if errors and not summaries:
+        place, err = errors[0]
+        return _friendly_error(err, place)
+    lines = [
+        f"{i}. {s['place']}: {s['level']} ({s['population']})"
+        for i, s in enumerate(summaries, 1)
+    ]
+    if len(summaries) >= 2 and summaries[0]["score"] == summaries[1]["score"]:
+        tied = [s["place"] for s in summaries if s["score"] == summaries[0]["score"]]
+        verdict = f"👉 지금 가장 한산한 후보는 {', '.join(tied[:3])}로 비슷해요."
     else:
-        verdict = f"👉 지금은 '{a if la < lb else b}'가 더 한산해요."
-    return (
-        f"{a}: {ca['congest_level']}\n"
-        f"{b}: {cb['congest_level']}\n{verdict}\n{NOTE}"
-    )
+        verdict = f"👉 지금 가장 한산한 곳은 '{summaries[0]['place']}'이에요."
+    if errors:
+        lines.append("일부 장소는 일시적으로 조회하지 못했어요: " + ", ".join(p for p, _ in errors))
+    return "\n".join(lines + [verdict, NOTE])
 
 
 @mcp.tool()
 async def best_time_to_go(place_name: str) -> str:
-    """향후 12시간 예측으로 가장 한산한 방문 시간대를 추천합니다."""
+    """서울 주요 장소의 향후 12시간 혼잡도 예측에서 가장 한산한 방문 시간대를 추천합니다."""
     kind, val = resolve_place(place_name)
     if kind != "ok":
         return _unresolved_msg(place_name, kind, val)
@@ -298,27 +506,53 @@ async def best_time_to_go(place_name: str) -> str:
     best = pick_best_times(parse_forecast(data))
     if not best:
         return f"'{place}'의 예측 데이터가 지금은 없어요.\n{NOTE}"
-    lines = [f"- {b['time']}: {b['level']}" for b in best]
+    weather_map = _weather_by_hour(data)
+    lines = [f"- {b['time']}: {b['level']}{_weather_suffix(b['time'], weather_map)}" for b in best]
     return (f"⏰ '{place}' 앞으로 12시간 중 한산한 시간대 TOP {len(best)}\n"
             + "\n".join(lines) + f"\n{NOTE}")
 
 
 @mcp.tool()
 def list_supported_hotspots() -> str:
-    """혼잡도 조회가 가능한 서울 주요 장소 목록을 안내합니다."""
+    """혼잡도 조회가 가능한 서울 주요 121곳 전체 목록을 카테고리별로 안내합니다. 장소명을 모를 때 먼저 쓰세요."""
     total = len(AREAS)
-    tourist = [n for n in AREAS if n.endswith("관광특구")]
-    parks = [n for n in AREAS if any(k in n for k in ("공원", "한강", "산", "숲", "섬"))]
-    streets = [n for n in AREAS if any(k in n for k in ("거리", "길", "로데오", "단길"))]
     examples = ["강남역", "홍대 관광특구", "성수카페거리", "여의도한강공원",
                 "광화문·덕수궁", "명동 관광특구", "북촌한옥마을", "잠실롯데타워·석촌호수"]
-    return (
+    lines = [
         f"서울 주요 {total}곳의 실시간 혼잡도·12시간 예측을 알려드려요.\n"
-        f"· 관광특구 {len(tourist)}곳 (홍대·명동·강남 MICE 등)\n"
-        f"· 공원·한강·산 {len(parks)}곳\n"
-        f"· 상권·거리 {len(streets)}곳, 그 외 주요 역·고궁·시장\n"
         f"예: {', '.join(examples)}\n"
-        f"정확한 이름을 몰라도 '성수'·'홍대'·'코엑스'처럼 말하면 찾아드려요."
+        f"정확한 이름을 몰라도 '성수'·'홍대입구역 롯데리아'·'더현대'처럼 말하면 가까운 지원 권역으로 찾아드려요."
+    ]
+    for category, names in AREA_CATEGORIES.items():
+        lines.append(f"\n[{category}] {len(names)}곳\n" + ", ".join(names))
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def recommend_less_crowded_hotspots(category: str = "전체", limit: int = 5) -> str:
+    """지금 바로 갈 만한 한산한 서울 핫플을 추천합니다. category는 전체, 한강공원, 공원, 역세권, 상권, 관광특구처럼 넣으세요."""
+    key, candidates, truncated = _candidate_places(category)
+    if not candidates:
+        return f"'{category}'에 맞는 추천 후보를 찾지 못했어요. list_supported_hotspots로 지원 장소를 확인해 주세요."
+    limit = max(1, min(int(limit or 5), 8))
+    summaries, errors = await _fetch_many_summaries(candidates)
+    if not summaries:
+        place, err = errors[0]
+        return _friendly_error(err, place)
+    top = summaries[:limit]
+    lines = []
+    for i, s in enumerate(top, 1):
+        extra = f" / {' / '.join(s['advisories'])}" if s["advisories"] else ""
+        lines.append(f"{i}. {s['place']}: {s['level']} ({s['population']}, 상권 {s['commercial']}){extra}")
+    scope = f"{key} 후보 {len(candidates)}곳"
+    if truncated:
+        scope += " 우선 조회"
+    if errors:
+        scope += f", {len(errors)}곳 일시 실패"
+    return (
+        f"📍 지금 비교적 한산한 곳 추천 ({scope})\n"
+        + "\n".join(lines)
+        + f"\n👉 지금은 '{top[0]['place']}'부터 고려해 보세요.\n{NOTE}"
     )
 
 

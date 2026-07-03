@@ -62,10 +62,30 @@ def test_compare_logic():
     print("✓ compare 판정 로직(여유 < 약간 붐빔)")
 
 
+def test_resolve_place_fallbacks():
+    assert H.resolve_place("홍대입구역 롯데리아") == ("ok", "홍대입구역(2호선)")
+    assert H.resolve_place("남산타워") == ("ok", "남산공원")
+    assert H.resolve_place("더현대서울") == ("ok", "여의도")
+    assert H.resolve_place("뚝섬유원지 근처") == ("ok", "뚝섬한강공원")
+    print("✓ resolve_place 별칭/부가어 폴백")
+
+
+def test_population_text_guard():
+    assert H._population_text({"ppltn_min": "", "ppltn_max": ""}) == "실시간 인구 정보없음"
+    assert H._population_text({"ppltn_min": "1000", "ppltn_max": "2000"}) == "실시간 인구 1000~2000명"
+    print("✓ 인구 범위 빈값 출력 가드")
+
+
 async def test_tools_registered():
     tools = await H.mcp.list_tools()
     names = {t.name for t in tools}
-    expected = {"get_hotspot_congestion", "compare_hotspots", "best_time_to_go", "list_supported_hotspots"}
+    expected = {
+        "get_hotspot_congestion",
+        "compare_hotspots",
+        "best_time_to_go",
+        "list_supported_hotspots",
+        "recommend_less_crowded_hotspots",
+    }
     assert expected.issubset(names), f"누락: {expected - names}"
     print(f"✓ MCP 도구 {len(names)}개 등록 확인: {sorted(names)}")
 
@@ -75,5 +95,7 @@ if __name__ == "__main__":
     test_parse_forecast()
     test_pick_best_times()
     test_compare_logic()
+    test_resolve_place_fallbacks()
+    test_population_text_guard()
     asyncio.run(test_tools_registered())
     print("\n🎉 전 항목 통과 — 파싱/비교/예측 로직 + MCP 도구 등록 정상")
