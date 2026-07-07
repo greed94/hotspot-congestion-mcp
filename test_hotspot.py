@@ -76,6 +76,79 @@ def test_population_text_guard():
     print("✓ 인구 범위 빈값 출력 가드")
 
 
+def test_category_key_compound():
+    # 카테고리 단어 뒤에 '근처/어디'가 붙어도 포괄('전체')로 붕괴하지 않아야
+    assert H._category_key("한강공원 근처") == "한강공원"
+    assert H._category_key("공원 근처") == "공원·산책"
+    assert H._category_key("역세권 근처") == "역세권"
+    assert H._category_key("한강공원") == "한강공원"
+    assert H._category_key("전체") == "전체"
+    print("✓ _category_key 복합입력 라우팅(포괄 별칭에 안 삼켜짐)")
+
+
+def test_friendly_error_hides_code():
+    assert "ERROR-500" not in H._friendly_error(H.CityDataError("ERROR-500", "x"), "성수")
+    assert "NO_DATA" not in H._friendly_error(H.CityDataError("NO_DATA"), "성수")
+    assert "많아요" in H._friendly_error(H.CityDataError("ERROR-337"), "성수")
+    print("✓ 에러 문구에 내부 코드 미노출 + 쿼터 안내")
+
+
+async def test_compare_same_place_guard():
+    # 같은 장소의 두 별칭 → dedup 후 1곳 → 최상급 단정 대신 안내(네트워크 호출 전 조기 반환)
+    out = await H.compare_hotspots("롯데타워", "롯데월드")
+    assert "한 곳" in out and "가장 한산한 곳" not in out, out
+    print("✓ compare 같은-장소 별칭쌍 가드")
+
+
+async def test_stale_cache_fallback():
+    # 서울 API 일시 장애 시 TTL 지난 직전 데이터라도 반환(기준시각 표기로 안전)
+    if not H.SEOUL_API_KEY:
+        H.SEOUL_API_KEY = "dummy"
+    H._cache["성수카페거리"] = (0.0, SAMPLE["CITYDATA"])
+
+    class _Down:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, url): raise RuntimeError("network down")
+
+    orig = H.httpx.AsyncClient
+    H.httpx.AsyncClient = _Down
+    try:
+        city = await H.fetch_citydata("성수카페거리")
+        assert city["AREA_NM"] == "성수카페거리"
+    finally:
+        H.httpx.AsyncClient = orig
+        H._cache.pop("성수카페거리", None)
+    print("✓ 서울 API 장애 시 직전 성공 데이터로 응답(스테일 폴백)")
+
+
+async def test_best_time_all_crowded_header():
+    crowded = {
+        "AREA_NM": "강남역",
+        "LIVE_PPLTN_STTS": [{
+            "AREA_CONGEST_LVL": "붐빔", "AREA_PPLTN_MIN": "80000", "AREA_PPLTN_MAX": "85000",
+            "FCST_PPLTN": [
+                {"FCST_TIME": "2026-07-07 20:00", "FCST_CONGEST_LVL": "붐빔"},
+                {"FCST_TIME": "2026-07-07 21:00", "FCST_CONGEST_LVL": "약간 붐빔"},
+                {"FCST_TIME": "2026-07-07 22:00", "FCST_CONGEST_LVL": "붐빔"},
+            ],
+        }],
+    }
+
+    async def fake_fetch(place, force=False):
+        return crowded
+
+    orig = H.fetch_citydata
+    H.fetch_citydata = fake_fetch
+    try:
+        out = await H.best_time_to_go("강남역")
+        assert "내내 붐비는" in out and "한산한 시간대" not in out, out
+    finally:
+        H.fetch_citydata = orig
+    print("✓ 12시간 전부 붐빌 땐 '한산한' 대신 '그나마 나은 시간대' 안내")
+
+
 async def test_tools_registered():
     tools = await H.mcp.list_tools()
     names = {t.name for t in tools}
@@ -97,5 +170,10 @@ if __name__ == "__main__":
     test_compare_logic()
     test_resolve_place_fallbacks()
     test_population_text_guard()
+    test_category_key_compound()
+    test_friendly_error_hides_code()
+    asyncio.run(test_compare_same_place_guard())
+    asyncio.run(test_stale_cache_fallback())
+    asyncio.run(test_best_time_all_crowded_header())
     asyncio.run(test_tools_registered())
     print("\n🎉 전 항목 통과 — 파싱/비교/예측 로직 + MCP 도구 등록 정상")

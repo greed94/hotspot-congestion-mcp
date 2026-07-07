@@ -12,6 +12,7 @@ import json
 import time
 import asyncio
 import difflib
+import threading
 import urllib.parse
 from typing import Any
 
@@ -232,28 +233,33 @@ class CityDataError(Exception):
 _cache: dict[str, tuple[float, dict]] = {}
 
 
-async def fetch_citydata(place_name: str) -> dict[str, Any]:
-    """공식 장소명으로 citydata 호출 → CITYDATA dict. 5분 TTL 캐시(성공 INFO-000만 캐시)."""
+async def fetch_citydata(place_name: str, force: bool = False) -> dict[str, Any]:
+    """공식 장소명으로 citydata 호출 → CITYDATA dict. 5분 TTL 캐시(성공만). force면 캐시 무시하고 갱신."""
     now = time.time()
     hit = _cache.get(place_name)
-    if hit and now - hit[0] < CACHE_TTL:
+    if not force and hit and now - hit[0] < CACHE_TTL:
         return hit[1]
     if not SEOUL_API_KEY:
         raise CityDataError("NO_KEY", "SEOUL_API_KEY 미설정")
     url = f"{BASE}/{SEOUL_API_KEY}/json/citydata/1/1/{urllib.parse.quote(place_name, safe='')}"
-    async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.get(url)
-        r.raise_for_status()
-        data = r.json()
-    result = data.get("RESULT") or {}
-    code = result.get("RESULT.CODE")
-    if code and code != "INFO-000":
-        raise CityDataError(code, result.get("RESULT.MESSAGE", ""))
-    city = data.get("CITYDATA")
-    if city is None and any(k in data for k in ("AREA_NM", "LIVE_PPLTN_STTS", "WEATHER_STTS")):
-        city = data
-    if not isinstance(city, dict) or not city.get("AREA_NM"):
-        raise CityDataError("NO_DATA", "CITYDATA 없음")
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+            data = r.json()
+        result = data.get("RESULT") or {}
+        code = result.get("RESULT.CODE")
+        if code and code != "INFO-000":
+            raise CityDataError(code, result.get("RESULT.MESSAGE", ""))
+        city = data.get("CITYDATA")
+        if city is None and any(k in data for k in ("AREA_NM", "LIVE_PPLTN_STTS", "WEATHER_STTS")):
+            city = data
+        if not isinstance(city, dict) or not city.get("AREA_NM"):
+            raise CityDataError("NO_DATA", "CITYDATA 없음")
+    except Exception:
+        if hit:  # 일시 장애면 직전 성공 데이터로 응답 — 기준시각이 표기되므로 안전
+            return hit[1]
+        raise
     _cache[place_name] = (now, city)
     return city
 
@@ -276,6 +282,7 @@ def parse_congestion(citydata: dict) -> dict:
         "ppltn_min": ppltn.get("AREA_PPLTN_MIN", ""),
         "ppltn_max": ppltn.get("AREA_PPLTN_MAX", ""),
         "commercial_level": cmrcl.get("AREA_CMRCL_LVL") or "정보없음",
+        "ppltn_time": ppltn.get("PPLTN_TIME", ""),
     }
 
 
@@ -369,25 +376,24 @@ def pick_best_times(forecast: list[dict], top_n: int = 3) -> list[dict]:
     return ranked[:top_n]
 
 
-NOTE = "※ 통신사 기지국 기반 추정치라 실제와 차이가 있을 수 있어요."
+NOTE = "※ 서울시 실시간 도시데이터 기반 · 통신사 기지국 추정치라 실제와 차이가 있을 수 있어요."
 
 
 def _category_key(category: str) -> str:
     q = _norm(category or "전체")
     if not q:
         return "전체"
-    for alias, key in CATEGORY_ALIASES.items():
-        if _norm(alias) in q:
-            return key
-    return "전체"
+    # '근처·어디' 같은 포괄 별칭이 '한강공원 근처'의 '한강'을 삼키지 않도록: 구체 카테고리 최장일치 우선
+    specific = [(len(_norm(a)), k) for a, k in CATEGORY_ALIASES.items()
+                if k != "전체" and _norm(a) in q]
+    return max(specific)[1] if specific else "전체"
 
 
-def _candidate_places(category: str, max_candidates: int = 16) -> tuple[str, list[str], bool]:
+def _candidate_places(category: str) -> tuple[str, list[str]]:
     key = _category_key(category)
     if key == "전체":
-        return key, [p for p in DEFAULT_RECOMMEND_AREAS if p in AREAS], False
-    places = AREA_CATEGORIES.get(key, [])
-    return key, places[:max_candidates], len(places) > max_candidates
+        return key, list(AREAS)
+    return key, AREA_CATEGORIES.get(key, [])
 
 
 async def _fetch_summary(place: str) -> dict:
@@ -400,6 +406,7 @@ async def _fetch_summary(place: str) -> dict:
         "population_score": (_to_int(c.get("ppltn_min")) + _to_int(c.get("ppltn_max"))) / 2,
         "population": _population_text(c),
         "commercial": c["commercial_level"],
+        "ppltn_time": c["ppltn_time"],
         "advisories": _visit_advisories(data),
     }
 
@@ -430,7 +437,9 @@ def _friendly_error(e: Exception, place: str) -> str:
             return f"'{place}'의 실시간 데이터가 지금은 비어 있어요. 잠시 후 다시 시도해 주세요."
         if e.code == "NO_KEY":
             return "서버에 서울 API 키(SEOUL_API_KEY)가 설정되지 않았어요."
-        return f"'{place}' 조회 중 오류가 났어요({e.code}). 잠시 후 다시 시도해 주세요."
+        if e.code == "ERROR-337":
+            return f"'{place}' 조회 요청이 잠시 많아요. 잠시 후 다시 시도해 주세요."
+        return f"'{place}' 조회 중 오류가 났어요. 잠시 후 다시 시도해 주세요."
     return f"'{place}' 조회에 실패했어요(일시적 오류). 잠시 후 다시 시도해 주세요."
 
 
@@ -449,8 +458,9 @@ async def get_hotspot_congestion(place_name: str) -> str:
     c = parse_congestion(data)
     advisories = _visit_advisories(data)
     advisory_line = f"방문 참고: {' / '.join(advisories)}\n" if advisories else ""
+    basis = f"{c['ppltn_time']} 기준" if c["ppltn_time"] else "지금"
     return (
-        f"📍 {c['area'] or place} 지금\n"
+        f"📍 {c['area'] or place} ({basis})\n"
         f"혼잡도: {c['congest_level']} ({_population_text(c)})\n"
         f"상권 활기: {c['commercial_level']}\n"
         f"한줄: {c['congest_msg']}\n"
@@ -474,6 +484,9 @@ async def compare_hotspots(place_a: str, place_b: str, place_c: str = "", place_
         if val not in places:
             places.append(val)
 
+    if len(places) < 2:  # 별칭 둘이 같은 장소로 좁혀지면 비교가 성립 안 함
+        return f"입력하신 곳이 모두 '{places[0]}' 한 곳이에요. 서로 다른 두 곳을 비교해 주세요."
+
     summaries, errors = await _fetch_many_summaries(places)
     if errors and not summaries:
         place, err = errors[0]
@@ -489,7 +502,9 @@ async def compare_hotspots(place_a: str, place_b: str, place_c: str = "", place_
         verdict = f"👉 지금 가장 한산한 곳은 '{summaries[0]['place']}'이에요."
     if errors:
         lines.append("일부 장소는 일시적으로 조회하지 못했어요: " + ", ".join(p for p, _ in errors))
-    return "\n".join(lines + [verdict, NOTE])
+    basis = next((s["ppltn_time"] for s in summaries if s.get("ppltn_time")), "")
+    tail = [verdict, f"({basis} 기준)"] if basis else [verdict]
+    return "\n".join(lines + tail + [NOTE])
 
 
 @mcp.tool()
@@ -508,8 +523,11 @@ async def best_time_to_go(place_name: str) -> str:
         return f"'{place}'의 예측 데이터가 지금은 없어요.\n{NOTE}"
     weather_map = _weather_by_hour(data)
     lines = [f"- {b['time']}: {b['level']}{_weather_suffix(b['time'], weather_map)}" for b in best]
-    return (f"⏰ '{place}' 앞으로 12시간 중 한산한 시간대 TOP {len(best)}\n"
-            + "\n".join(lines) + f"\n{NOTE}")
+    if CONGEST_ORDER.get(best[0]["level"], 0) >= CONGEST_ORDER["약간 붐빔"]:
+        header = f"⏰ '{place}'은(는) 앞으로 12시간 내내 붐비는 편이에요. 그나마 나은 시간대 TOP {len(best)}"
+    else:
+        header = f"⏰ '{place}' 앞으로 12시간 중 한산한 시간대 TOP {len(best)}"
+    return header + "\n" + "\n".join(lines) + f"\n{NOTE}"
 
 
 @mcp.tool()
@@ -531,7 +549,7 @@ def list_supported_hotspots() -> str:
 @mcp.tool()
 async def recommend_less_crowded_hotspots(category: str = "전체", limit: int = 5) -> str:
     """지금 바로 갈 만한 한산한 서울 핫플을 추천합니다. category는 전체, 한강공원, 공원, 역세권, 상권, 관광특구처럼 넣으세요."""
-    key, candidates, truncated = _candidate_places(category)
+    key, candidates = _candidate_places(category)
     if not candidates:
         return f"'{category}'에 맞는 추천 후보를 찾지 못했어요. list_supported_hotspots로 지원 장소를 확인해 주세요."
     limit = max(1, min(int(limit or 5), 8))
@@ -544,18 +562,34 @@ async def recommend_less_crowded_hotspots(category: str = "전체", limit: int =
     for i, s in enumerate(top, 1):
         extra = f" / {' / '.join(s['advisories'])}" if s["advisories"] else ""
         lines.append(f"{i}. {s['place']}: {s['level']} ({s['population']}, 상권 {s['commercial']}){extra}")
-    scope = f"{key} 후보 {len(candidates)}곳"
-    if truncated:
-        scope += " 우선 조회"
+    scope = f"{key} {len(candidates)}곳 중"
     if errors:
         scope += f", {len(errors)}곳 일시 실패"
+    basis = next((s["ppltn_time"] for s in summaries if s.get("ppltn_time")), "")
+    basis_line = f" · {basis} 기준" if basis else ""
     return (
-        f"📍 지금 비교적 한산한 곳 추천 ({scope})\n"
+        f"📍 지금 비교적 한산한 곳 추천 ({scope}{basis_line})\n"
         + "\n".join(lines)
         + f"\n👉 지금은 '{top[0]['place']}'부터 고려해 보세요.\n{NOTE}"
     )
 
 
+WARM_SLEEP = 180  # 한 바퀴(약 40초) 돈 뒤 대기 — 데이터 5분 주기보다 촘촘히 갱신
+
+
+async def _cache_warmer() -> None:
+    """백그라운드: 121곳을 미리 당겨 캐시를 채워둠. recommend/조회가 서울 서버를 안 타고 즉답."""
+    while True:
+        for place in list(AREAS):
+            try:
+                await fetch_citydata(place, force=True)
+            except Exception:
+                pass  # 개별 실패는 다음 바퀴에 재시도
+        await asyncio.sleep(WARM_SLEEP)
+
+
 if __name__ == "__main__":
+    # 캐시 워머를 별도 스레드(독립 이벤트루프)로 — 서버 이벤트루프와 무관하게 _cache만 채움
+    threading.Thread(target=lambda: asyncio.run(_cache_warmer()), daemon=True).start()
     # 원격 MCP: streamable-http (배포 전송은 공식 가이드에 맞춰 확정)
     mcp.run(transport="streamable-http")
