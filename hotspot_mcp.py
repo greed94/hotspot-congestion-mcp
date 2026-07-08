@@ -20,6 +20,7 @@ import logging
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 logging.getLogger("httpx").setLevel(logging.WARNING)  # 요청 로그에 API 키(URL 내)가 남지 않게
 
@@ -214,10 +215,10 @@ def resolve_place(query: str):
         return ("ok", embedded[0])
     if len(embedded) > 1:
         return ("ambiguous", embedded[:6])
-    close = difflib.get_close_matches(q, list(_NORM_TO_NAME), n=3, cutoff=0.6)  # 5. 오타 보정
-    if len(close) == 1:
-        return ("ok", _NORM_TO_NAME[close[0]])
+    close = difflib.get_close_matches(q, list(_NORM_TO_NAME), n=3, cutoff=0.6)  # 5. 오타 후보
     if close:
+        # 자동 확정 금지: '판교역'→교대역, '샤로수길'→가로수길처럼 미지원 장소가
+        # 비슷한 이름의 엉뚱한 데이터로 답하는 것 방지(유사도로는 진짜 오타와 구분 불가)
         return ("ambiguous", [_NORM_TO_NAME[c] for c in close])
     return ("notfound", [])
 
@@ -425,6 +426,9 @@ async def _fetch_many_summaries(places: list[str]) -> tuple[list[dict], list[tup
 
 def _unresolved_msg(query: str, kind: str, candidates: list[str]) -> str:
     if kind == "ambiguous":
+        if len(candidates) == 1:
+            return (f"'{query}'을(를) 정확히 찾지 못했어요. 혹시 '{candidates[0]}' 말씀이신가요? "
+                    f"맞으면 그 이름으로 다시 물어봐 주세요. (지원하지 않는 장소일 수도 있어요)")
         return (f"'{query}' 후보가 여러 곳이에요: {', '.join(candidates)}\n"
                 f"정확한 이름으로 다시 물어봐 주세요.")
     return (f"'{query}'은(는) 지원 목록에 없어요. "
@@ -444,9 +448,18 @@ def _friendly_error(e: Exception, place: str) -> str:
 
 
 # ---------- MCP 도구 ----------
-@mcp.tool()
+def _annot(role: str, open_world: bool = True) -> ToolAnnotations:
+    """PlayMCP 심사 요건: 툴별 annotations 필수. 전 도구 읽기 전용(조회만)."""
+    return ToolAnnotations(
+        title=f"핫플 혼잡도 비서 · {role}",
+        readOnlyHint=True,
+        openWorldHint=open_world,
+    )
+
+
+@mcp.tool(annotations=_annot("현재 혼잡도 조회"))
 async def get_hotspot_congestion(place_name: str) -> str:
-    """서울 주요 장소의 지금 혼잡도와 상권 활기를 알려줍니다. 가게명보다 '홍대입구역', '성수', '더현대'처럼 장소/권역명을 넣으세요."""
+    """[핫플 혼잡도 비서] 서울 주요 장소의 지금 혼잡도와 상권 활기를 알려줍니다. 가게명보다 '홍대입구역', '성수', '더현대'처럼 장소/권역명을 넣으세요."""
     kind, val = resolve_place(place_name)
     if kind != "ok":
         return _unresolved_msg(place_name, kind, val)
@@ -469,9 +482,9 @@ async def get_hotspot_congestion(place_name: str) -> str:
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=_annot("혼잡도 비교(2~4곳)"))
 async def compare_hotspots(place_a: str, place_b: str, place_c: str = "", place_d: str = "") -> str:
-    """서울 핫플 2~4곳의 현재 혼잡도를 비교합니다. '성수 vs 홍대 vs 강남역'처럼 여러 후보 중 더 한산한 곳을 고를 때 쓰세요."""
+    """[핫플 혼잡도 비서] 서울 핫플 2~4곳의 현재 혼잡도를 비교합니다. '성수 vs 홍대 vs 강남역'처럼 여러 후보 중 더 한산한 곳을 고를 때 쓰세요."""
     queries = [q.strip() for q in (place_a, place_b, place_c, place_d) if q and q.strip()]
     if len(queries) < 2:
         return "비교하려면 장소를 최소 2곳 알려주세요. 예: 성수와 홍대 비교"
@@ -507,9 +520,9 @@ async def compare_hotspots(place_a: str, place_b: str, place_c: str = "", place_
     return "\n".join(lines + tail + [NOTE])
 
 
-@mcp.tool()
+@mcp.tool(annotations=_annot("한산한 시간대 추천"))
 async def best_time_to_go(place_name: str) -> str:
-    """서울 주요 장소의 향후 12시간 혼잡도 예측에서 가장 한산한 방문 시간대를 추천합니다."""
+    """[핫플 혼잡도 비서] 서울 주요 장소의 향후 12시간 혼잡도 예측에서 가장 한산한 방문 시간대를 추천합니다."""
     kind, val = resolve_place(place_name)
     if kind != "ok":
         return _unresolved_msg(place_name, kind, val)
@@ -530,9 +543,9 @@ async def best_time_to_go(place_name: str) -> str:
     return header + "\n" + "\n".join(lines) + f"\n{NOTE}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=_annot("지원 장소 목록", open_world=False))
 def list_supported_hotspots() -> str:
-    """혼잡도 조회가 가능한 서울 주요 121곳 전체 목록을 카테고리별로 안내합니다. 장소명을 모를 때 먼저 쓰세요."""
+    """[핫플 혼잡도 비서] 혼잡도 조회가 가능한 서울 주요 121곳 전체 목록을 카테고리별로 안내합니다. 장소명을 모를 때 먼저 쓰세요."""
     total = len(AREAS)
     examples = ["강남역", "홍대 관광특구", "성수카페거리", "여의도한강공원",
                 "광화문·덕수궁", "명동 관광특구", "북촌한옥마을", "잠실롯데타워·석촌호수"]
@@ -546,9 +559,9 @@ def list_supported_hotspots() -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_annot("한산한 곳 추천"))
 async def recommend_less_crowded_hotspots(category: str = "전체", limit: int = 5) -> str:
-    """지금 바로 갈 만한 한산한 서울 핫플을 추천합니다. category는 전체, 한강공원, 공원, 역세권, 상권, 관광특구처럼 넣으세요."""
+    """[핫플 혼잡도 비서] 지금 바로 갈 만한 한산한 서울 핫플을 추천합니다. category는 전체, 한강공원, 공원, 역세권, 상권, 관광특구, 고궁, 명소처럼 넣으세요."""
     key, candidates = _candidate_places(category)
     if not candidates:
         return f"'{category}'에 맞는 추천 후보를 찾지 못했어요. list_supported_hotspots로 지원 장소를 확인해 주세요."

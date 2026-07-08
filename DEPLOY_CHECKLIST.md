@@ -31,9 +31,9 @@ https://<배포된-도메인>/mcp
 
 현재 버전은 `VERSION` 파일을 기준으로 합니다.
 
-- 현재 버전: `v1.0.0` (예선 제출 기준선)
+- 현재 버전: `v1.0.1` (예선 재심사 제출 — 반려 사유 annotations/서비스명 해소)
 - GHCR latest 이미지: `ghcr.io/greed94/hotspot-congestion-mcp:latest`
-- GHCR 고정 버전 이미지: `ghcr.io/greed94/hotspot-congestion-mcp:v1.0.0`
+- GHCR 고정 버전 이미지: `ghcr.io/greed94/hotspot-congestion-mcp:v1.0.1`
 
 카카오클라우드 등록/재등록에는 가능하면 `latest`보다 고정 버전 태그를 쓰세요. 그래야 현재 배포된 서버가 어떤 코드인지 추적하기 쉽습니다.
 

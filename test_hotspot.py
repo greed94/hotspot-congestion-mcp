@@ -100,6 +100,28 @@ async def test_compare_same_place_guard():
     print("✓ compare 같은-장소 별칭쌍 가드")
 
 
+def test_resolve_no_silent_fuzzy():
+    # 비슷한 이름의 미지원 장소가 엉뚱한 서울 장소로 조용히 확정되지 않아야 (실서버 #117/#132 오답 재발 방지)
+    kind, cands = H.resolve_place("판교역")
+    assert kind == "ambiguous" and "교대역" in cands, (kind, cands)
+    kind, cands = H.resolve_place("샤로수길")
+    assert kind == "ambiguous" and "가로수길" in cands, (kind, cands)
+    assert H.resolve_place("강남녁") == ("ok", "강남역")  # 진짜 오타는 별칭 복구 경로로 여전히 자동 보정
+    assert H.resolve_place("을지로입구역") == ("notfound", [])
+    msg = H._unresolved_msg("판교역", "ambiguous", ["교대역"])
+    assert "혹시" in msg and "교대역" in msg
+    print("✓ 오타보정 자동확정 제거(확인형) — 판교역/샤로수길 오답 차단")
+
+
+async def test_annotations_and_service_name():
+    tools = await H.mcp.list_tools()
+    for t in tools:
+        assert t.annotations is not None and t.annotations.readOnlyHint is True, t.name
+        assert "핫플 혼잡도 비서" in (t.description or ""), t.name
+        assert "핫플 혼잡도 비서" in (t.annotations.title or ""), t.name
+    print(f"✓ 툴 {len(tools)}개 전부 annotations + 서비스명 포함(심사 반려 사유 해소)")
+
+
 async def test_stale_cache_fallback():
     # 서울 API 일시 장애 시 TTL 지난 직전 데이터라도 반환(기준시각 표기로 안전)
     if not H.SEOUL_API_KEY:
@@ -172,7 +194,9 @@ if __name__ == "__main__":
     test_population_text_guard()
     test_category_key_compound()
     test_friendly_error_hides_code()
+    test_resolve_no_silent_fuzzy()
     asyncio.run(test_compare_same_place_guard())
+    asyncio.run(test_annotations_and_service_name())
     asyncio.run(test_stale_cache_fallback())
     asyncio.run(test_best_time_all_crowded_header())
     asyncio.run(test_tools_registered())
