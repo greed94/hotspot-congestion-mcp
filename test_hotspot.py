@@ -116,10 +116,18 @@ def test_resolve_no_silent_fuzzy():
 async def test_annotations_and_service_name():
     tools = await H.mcp.list_tools()
     for t in tools:
-        assert t.annotations is not None and t.annotations.readOnlyHint is True, t.name
+        a = t.annotations
+        assert a is not None, t.name
+        # PlayMCP 심사: 힌트 4종 전부 명시돼야 함 (2차 반려 사유: destructive/idempotent 누락)
+        assert a.readOnlyHint is True, t.name
+        assert a.destructiveHint is False, t.name
+        assert a.idempotentHint is True, t.name
+        assert a.openWorldHint is not None, t.name
         assert "핫플 혼잡도 비서" in (t.description or ""), t.name
-        assert "핫플 혼잡도 비서" in (t.annotations.title or ""), t.name
-    print(f"✓ 툴 {len(tools)}개 전부 annotations + 서비스명 포함(심사 반려 사유 해소)")
+        assert "핫플 혼잡도 비서" in (a.title or ""), t.name
+        for pname, schema in t.inputSchema.get("properties", {}).items():
+            assert schema.get("description"), f"{t.name}.{pname} 파라미터 설명 없음"
+    print(f"✓ 툴 {len(tools)}개: 힌트 4종 명시 + 서비스명 + 전 파라미터 설명(1·2차 반려 사유 해소)")
 
 
 async def test_stale_cache_fallback():

@@ -14,11 +14,12 @@ import asyncio
 import difflib
 import threading
 import urllib.parse
-from typing import Any
+from typing import Annotated, Any
 
 import logging
 
 import httpx
+from pydantic import Field
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
@@ -449,16 +450,23 @@ def _friendly_error(e: Exception, place: str) -> str:
 
 # ---------- MCP 도구 ----------
 def _annot(role: str, open_world: bool = True) -> ToolAnnotations:
-    """PlayMCP 심사 요건: 툴별 annotations 필수. 전 도구 읽기 전용(조회만)."""
+    """PlayMCP 심사 요건: 툴별 annotations의 힌트 4종 모두 명시 필수. 전 도구 읽기 전용(조회만)."""
     return ToolAnnotations(
         title=f"핫플 혼잡도 비서 · {role}",
         readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
         openWorldHint=open_world,
     )
 
 
+_PLACE_DESC = "서울 장소/권역명 또는 별칭 (예: 홍대, 성수, 더현대, 남산타워)"
+
+
 @mcp.tool(annotations=_annot("현재 혼잡도 조회"))
-async def get_hotspot_congestion(place_name: str) -> str:
+async def get_hotspot_congestion(
+    place_name: Annotated[str, Field(description=_PLACE_DESC)],
+) -> str:
     """[핫플 혼잡도 비서] 서울 주요 장소의 지금 혼잡도와 상권 활기를 알려줍니다. 가게명보다 '홍대입구역', '성수', '더현대'처럼 장소/권역명을 넣으세요."""
     kind, val = resolve_place(place_name)
     if kind != "ok":
@@ -483,7 +491,12 @@ async def get_hotspot_congestion(place_name: str) -> str:
 
 
 @mcp.tool(annotations=_annot("혼잡도 비교(2~4곳)"))
-async def compare_hotspots(place_a: str, place_b: str, place_c: str = "", place_d: str = "") -> str:
+async def compare_hotspots(
+    place_a: Annotated[str, Field(description=f"비교할 첫 번째 {_PLACE_DESC}")],
+    place_b: Annotated[str, Field(description=f"비교할 두 번째 {_PLACE_DESC}")],
+    place_c: Annotated[str, Field(description="비교할 세 번째 장소 (선택)")] = "",
+    place_d: Annotated[str, Field(description="비교할 네 번째 장소 (선택)")] = "",
+) -> str:
     """[핫플 혼잡도 비서] 서울 핫플 2~4곳의 현재 혼잡도를 비교합니다. '성수 vs 홍대 vs 강남역'처럼 여러 후보 중 더 한산한 곳을 고를 때 쓰세요."""
     queries = [q.strip() for q in (place_a, place_b, place_c, place_d) if q and q.strip()]
     if len(queries) < 2:
@@ -521,7 +534,9 @@ async def compare_hotspots(place_a: str, place_b: str, place_c: str = "", place_
 
 
 @mcp.tool(annotations=_annot("한산한 시간대 추천"))
-async def best_time_to_go(place_name: str) -> str:
+async def best_time_to_go(
+    place_name: Annotated[str, Field(description=_PLACE_DESC)],
+) -> str:
     """[핫플 혼잡도 비서] 서울 주요 장소의 향후 12시간 혼잡도 예측에서 가장 한산한 방문 시간대를 추천합니다."""
     kind, val = resolve_place(place_name)
     if kind != "ok":
@@ -560,7 +575,10 @@ def list_supported_hotspots() -> str:
 
 
 @mcp.tool(annotations=_annot("한산한 곳 추천"))
-async def recommend_less_crowded_hotspots(category: str = "전체", limit: int = 5) -> str:
+async def recommend_less_crowded_hotspots(
+    category: Annotated[str, Field(description="추천 범위: 전체, 한강공원, 공원, 역세권, 상권, 관광특구, 고궁, 명소")] = "전체",
+    limit: Annotated[int, Field(description="추천 개수 (1~8, 기본 5)")] = 5,
+) -> str:
     """[핫플 혼잡도 비서] 지금 바로 갈 만한 한산한 서울 핫플을 추천합니다. category는 전체, 한강공원, 공원, 역세권, 상권, 관광특구, 고궁, 명소처럼 넣으세요."""
     key, candidates = _candidate_places(category)
     if not candidates:
